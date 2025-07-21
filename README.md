@@ -6,3 +6,4 @@
 ### 谷歌Gemini网址：https://aistudio.google.com/prompts/new_chat
 ## 3.代码上传github项目，跟cursor聊天实现
 ## 4.vercel或netify平台一键部署网站 
+### netify网址：https://app.netlify.com/
