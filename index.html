@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Particle Morphing</title>
+    <style>
+        :root {
+            --primary-font: 'Courier New', Courier, monospace;
+            --ui-bg-color: rgba(20, 20, 40, 0.7);
+            --ui-border-color: #6a73ff;
+            --text-color: #e0e0e0;
+            --glow-color: rgba(127, 178, 255, 0.7);
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000000;
+            color: var(--text-color);
+            font-family: var(--primary-font);
+        }
+
+        #webgl-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            outline: none;
+        }
+
+        .ui-panel {
+            position: fixed;
+            padding: 10px 15px;
+            background: var(--ui-bg-color);
+            border: 1px solid var(--ui-border-color);
+            border-radius: 8px;
+            backdrop-filter: blur(5px);
+            box-shadow: 0 0 15px var(--glow-color);
+            text-align: center;
+        }
+
+        #shape-info {
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 1em;
+        }
+
+        #controls {
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        #change-shape-btn {
+            background-color: #435cff;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            font-family: var(--primary-font);
+            font-size: 1.1em;
+            font-weight: bold;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        #change-shape-btn:hover {
+            background-color: #6a73ff;
+            box-shadow: 0 0 20px var(--glow-color);
+        }
+
+        .color-picker {
+            display: flex;
+            gap: 10px;
+        }
+
+        .color-circle {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            cursor: pointer;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            transition: transform 0.2s, border-color 0.2s;
+        }
+        
+        .color-circle:hover {
+            transform: scale(1.1);
+        }
+
+        .color-circle.active {
+            border-color: #ffffff;
+            box-shadow: 0 0 10px #ffffff;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="webgl-canvas"></canvas>
+
+    <div id="shape-info" class="ui-panel"></div>
+
+    <div id="controls" class="ui-panel">
+        <button id="change-shape-btn">Change Shape</button>
+        <div class="color-picker" id="color-picker"></div>
+    </div>
+    
+    <!-- CDN for libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.9.1/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script type="module">
+        // --- SENIOR DEV INSIGHTS ---
+        // 1. Structure: We use a modular pattern inside a single script tag. This keeps the code organized.
+        // 2. Performance: `BufferGeometry` is key. Manipulating the attribute arrays directly and telling Three.js
+        //    they need updates (`needsUpdate = true`) is far more performant than creating new geometries.
+        // 3. Animation: GSAP is chosen for its reliability and power. A single `gsap.to()` call on a proxy
+        //    object which then updates all vertices in its `onUpdate` callback is a clean and efficient pattern.
+        // 4. Readability: Variables are clearly named. Magic numbers are minimized. Shape generation logic
+        //    is separated into distinct functions.
+        
+        let scene, camera, renderer, particles, controls;
+        let geometry, material;
+        let positions, colors;
+        
+        const PARTICLE_COUNT = 20000;
+        const shapes = [];
+        let currentShapeIndex = 0;
+        let isMorphing = false;
+
+        const ui = {
+            shapeInfo: document.getElementById('shape-info'),
+            changeBtn: document.getElementById('change-shape-btn'),
+            colorPicker: document.getElementById('color-picker')
+        };
+        
+        const colorPalettes = [
+            { name: 'orange', base: new THREE.Color('#ff4800'), range: new THREE.Color('#ffff00') },
+            { name: 'purple', base: new THREE.Color('#4319fa'), range: new THREE.Color('#ff00ff') },
+            { name: 'green', base: new THREE.Color('#00ff7f'), range: new THREE.Color('#adff2f') },
+            { name: 'rainbow', base: new THREE.Color(0xffffff), range: null } // Special case
+        ];
+        let activeColorPalette = 0;
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 25;
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('webgl-canvas'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            
+            // Particles
+            createParticles();
+
+            // Shapes
+            generateShapeData();
+            
+            // UI
+            setupUI();
+
+            // Initial Morph
+            morphToShape(0, 2.5);
+            
+            // Start animation loop
+            animate();
+        }
+        
+        function createParticles() {
+            geometry = new THREE.BufferGeometry();
+            positions = new Float32Array(PARTICLE_COUNT * 3);
+            colors = new Float32Array(PARTICLE_COUNT * 3);
+
+            // Start with random positions
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                positions[i] = (Math.random() - 0.5) * 10;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            material = new THREE.PointsMaterial({
+                size: 0.1,
+                vertexColors: true,
+                sizeAttenuation: true,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                depthWrite: false,
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+        
+        function generateShapeData() {
+            shapes.push({ name: 'Sphere', data: createSphere() });
+            shapes.push({ name: 'Cube', data: createCube() });
+            shapes.push({ name: 'Pyramid', data: createPyramid() });
+            shapes.push({ name: 'Torus', data: createTorus() });
+            shapes.push({ name: 'Galaxy', data: createGalaxy() });
+            shapes.push({ name: 'Wave', data: createWave() });
+        }
+
+        function createSphere() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const radius = 10;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+                const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+                
+                data[i * 3] = radius * Math.cos(theta) * Math.sin(phi);
+                data[i * 3 + 1] = radius * Math.sin(theta) * Math.sin(phi);
+                data[i * 3 + 2] = radius * Math.cos(phi);
+            }
+            return data;
+        }
+
+        function createCube() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const size = 15;
+            for(let i=0; i<PARTICLE_COUNT * 3; i++){
+                data[i] = (Math.random() - 0.5) * size;
+            }
+            return data;
+        }
+        
+        function createPyramid() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const height = 12;
+            const baseSize = 12;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = Math.random();
+                const h = Math.pow(Math.random(), 0.5) * height;
+
+                const angle = Math.random() * Math.PI * 2;
+                const radiusAtHeight = (1 - h / height) * baseSize * r;
+
+                data[i * 3] = Math.cos(angle) * radiusAtHeight;
+                data[i * 3 + 1] = h - height / 2;
+                data[i * 3 + 2] = Math.sin(angle) * radiusAtHeight;
+            }
+            return data;
+        }
+
+        function createTorus() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const R = 7; // Major radius
+            const r = 3; // Minor radius
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const u = Math.random() * Math.PI * 2;
+                const v = Math.random() * Math.PI * 2;
+                data[i * 3] = (R + r * Math.cos(v)) * Math.cos(u);
+                data[i * 3 + 1] = (R + r * Math.cos(v)) * Math.sin(u);
+                data[i * 3 + 2] = r * Math.sin(v);
+            }
+            return data;
+        }
+
+        function createGalaxy() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const radius = 15;
+            const arms = 3;
+            const armSpread = 0.5;
+            const coreRatio = 0.3;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = Math.random() * radius;
+                const spinAngle = r * armSpread;
+                const armAngle = (i % arms) * (Math.PI * 2 / arms);
+                const totalAngle = spinAngle + armAngle;
+
+                const x = Math.cos(totalAngle) * r;
+                const z = Math.sin(totalAngle) * r;
+                let y = (Math.random() - 0.5) * 0.5; // Thickness
+
+                // Core bulge
+                if (r < radius * coreRatio) {
+                    y = (Math.random() - 0.5) * (1 - r / (radius * coreRatio)) * 3;
+                }
+
+                data[i * 3] = x;
+                data[i * 3 + 1] = y;
+                data[i * 3 + 2] = z;
+            }
+            return data;
+        }
+
+        function createWave() {
+            const data = new Float32Array(PARTICLE_COUNT * 3);
+            const size = 20;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const x = (Math.random() - 0.5) * size;
+                const z = (Math.random() - 0.5) * size;
+                const dist = Math.sqrt(x*x + z*z);
+                const y = Math.sin(dist * 0.8 - performance.now() * 0.001) * Math.cos(x * 0.5) * 2;
+                
+                data[i * 3] = x;
+                data[i * 3 + 1] = y;
+                data[i * 3 + 2] = z;
+            }
+            return data;
+        }
+        
+        function setupUI() {
+            ui.changeBtn.addEventListener('click', () => {
+                if (isMorphing) return;
+                currentShapeIndex = (currentShapeIndex + 1) % shapes.length;
+                morphToShape(currentShapeIndex, 1.5);
+            });
+            
+            // Create color circles
+            colorPalettes.forEach((palette, index) => {
+                const circle = document.createElement('div');
+                circle.classList.add('color-circle');
+                if (palette.range) {
+                    circle.style.background = `linear-gradient(45deg, ${palette.base.getStyle()}, ${palette.range.getStyle()})`;
+                } else {
+                    circle.style.background = `radial-gradient(circle, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #9400d3)`;
+                }
+                if (index === activeColorPalette) circle.classList.add('active');
+                
+                circle.addEventListener('click', () => {
+                    if (isMorphing) return;
+                    document.querySelector('.color-circle.active').classList.remove('active');
+                    circle.classList.add('active');
+                    activeColorPalette = index;
+                    updateColors();
+                });
+                ui.colorPicker.appendChild(circle);
+            });
+        }
+        
+        function morphToShape(index, duration) {
+            if (isMorphing) return;
+            isMorphing = true;
+            
+            const targetShape = shapes[index];
+            const targetPositions = targetShape.data;
+
+            ui.shapeInfo.textContent = 'Morphing...';
+            ui.changeBtn.disabled = true;
+
+            const proxy = { value: 0 };
+            gsap.to(proxy, {
+                value: 1,
+                duration: duration,
+                ease: 'power3.inOut',
+                onUpdate: () => {
+                    const currentPositions = geometry.attributes.position.array;
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        const i3 = i * 3;
+                        // This is the core interpolation logic
+                        currentPositions[i3] = (1 - proxy.value) * currentPositions[i3] + proxy.value * targetPositions[i3];
+                        currentPositions[i3 + 1] = (1 - proxy.value) * currentPositions[i3 + 1] + proxy.value * targetPositions[i3 + 1];
+                        currentPositions[i3 + 2] = (1 - proxy.value) * currentPositions[i3 + 2] + proxy.value * targetPositions[i3 + 2];
+                    }
+                    geometry.attributes.position.needsUpdate = true;
+                },
+                onComplete: () => {
+                    // Directly set final positions to avoid floating point errors
+                    geometry.attributes.position.array.set(targetPositions);
+                    geometry.attributes.position.needsUpdate = true;
+                    
+                    isMorphing = false;
+                    ui.shapeInfo.textContent = `Shape: ${targetShape.name} (Click to morph)`;
+                    ui.changeBtn.disabled = false;
+                    
+                    // The Wave shape needs continuous animation
+                    if (targetShape.name === 'Wave') {
+                        isWaveActive = true;
+                    } else {
+                        isWaveActive = false;
+                    }
+
+                    updateColors();
+                }
+            });
+        }
+
+        function updateColors() {
+             const palette = colorPalettes[activeColorPalette];
+             const targetColors = new Float32Array(PARTICLE_COUNT * 3);
+             const tempColor = new THREE.Color();
+
+             for (let i = 0; i < PARTICLE_COUNT; i++) {
+                 if (palette.name === 'rainbow') {
+                     tempColor.setHSL(Math.random(), 1.0, 0.5);
+                 } else {
+                     tempColor.copy(palette.base).lerp(palette.range, Math.random());
+                 }
+                 targetColors[i * 3] = tempColor.r;
+                 targetColors[i * 3 + 1] = tempColor.g;
+                 targetColors[i * 3 + 2] = tempColor.b;
+             }
+             
+             // Animate colors smoothly
+             gsap.to(geometry.attributes.color.array, {
+                endArray: targetColors, // GSAP's endArray plugin is great for this
+                duration: 1.5,
+                ease: 'power2.inOut',
+                onUpdate: () => {
+                    geometry.attributes.color.needsUpdate = true;
+                }
+             });
+        }
+        
+        let isWaveActive = false;
+        function updateWave() {
+            const positions = geometry.attributes.position.array;
+            const time = performance.now() * 0.001;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                const x = positions[i3];
+                const z = positions[i3 + 2];
+                const dist = Math.sqrt(x*x + z*z);
+                positions[i3 + 1] = Math.sin(dist * 0.8 - time) * Math.cos(x * 0.5) * 2;
+            }
+            geometry.attributes.position.needsUpdate = true;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if(isWaveActive && !isMorphing) {
+                updateWave();
+            }
+
+            controls.update();
+            particles.rotation.y += 0.0005;
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        window.addEventListener('resize', onWindowResize, false);
+
+        init();
+
+    </script>
+</body>
+</html>
